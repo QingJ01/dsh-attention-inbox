@@ -1,0 +1,84 @@
+{
+  "sha256": "5c827044e12958531d043e3130ea448377893aff3694b0063f77fa36cf8b1314",
+  "eventCount": 3142,
+  "source": {
+    "capturedAt": "2026-11-04T12:52:20.686Z",
+    "capture": "Existing DSH Inspector -> live-preferred sessionQuery.readSession; source-filtered structural events only",
+    "aliases": [
+      {
+        "alias": "s1",
+        "sourceIdSha256": "1e45bc6b5aa560292fd8290454325418a6b15f4997d7e318093fabbcefec474c"
+      },
+      {
+        "alias": "s2",
+        "sourceIdSha256": "c98c8b77d89243e760f808be0fbdefb988e56f6f2301e9a58c6cca4b41cd6d9e"
+      },
+      {
+        "alias": "s3",
+        "sourceIdSha256": "81c4e08b2bcb435e149b5a1fa3c966db3063336d383be4e172c878bb682effd4"
+      }
+    ],
+    "redactions": [
+      "all text, tool arguments/results and non-whitelisted event data removed",
+      "goal ids mapped per session; objectives and blocker messages replaced with [redacted]"
+    ]
+  },
+  "postCaptureMinimization": "Removed goal configuration and blocker detail: retain only anonymous id/revision/phase and fixed [redacted] objective required by projection schema.",
+  "replayAdapter": "Non-goal/turn/user-message events retain original envelopes in recording; test input maps these payload-stripped events to inert acceptance/ignored for contiguous ProjectionRegistry replay.",
+  "sessions": [
+    {
+      "id": "s1",
+      "origin": "user",
+      "eventCount": 2004,
+      "sourceKinds": [
+        "agent-message",
+        "model-selection",
+        "runtime-context",
+        "skill-catalog",
+        "subagent-settled",
+        "time-context",
+        "user"
+      ],
+      "turnEndKinds": [
+        "completed"
+      ],
+      "autonomousGoalRounds": 0,
+      "goalPhases": [
+        "active",
+        "complete"
+      ]
+    },
+    {
+      "id": "s2",
+      "origin": "subagent",
+      "eventCount": 606,
+      "sourceKinds": [
+        "runtime-context",
+        "skill-catalog",
+        "time-context",
+        "user"
+      ],
+      "turnEndKinds": [
+        "completed"
+      ],
+      "autonomousGoalRounds": 0,
+      "goalPhases": []
+    },
+    {
+      "id": "s3",
+      "origin": "subagent",
+      "eventCount": 532,
+      "sourceKinds": [
+        "runtime-context",
+        "skill-catalog",
+        "time-context",
+        "user"
+      ],
+      "turnEndKinds": [
+        "completed"
+      ],
+      "autonomousGoalRounds": 0,
+      "goalPhases": []
+    }
+  ]
+}

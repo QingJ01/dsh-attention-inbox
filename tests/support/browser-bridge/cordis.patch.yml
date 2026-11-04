@@ -1,0 +1,3 @@
+- insert:
+    - id: attention-acceptance-bridge-v6
+      name: '@local/attention-acceptance-bridge-v6'

@@ -1,0 +1,63 @@
+{
+  "name": "dsh-attention-inbox",
+  "version": "1.0.0-rc.2",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "check": "node --check index.js && node --check client.js && node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "zod": "^4.1.0"
+  },
+  "private": true,
+  "type": "module",
+  "description": "Attention inbox: one place for everything in DeepSeek Harness that is waiting for you.",
+  "exports": {
+    ".": "./index.js",
+    "./host": "./host.js",
+    "./client": "./client.js",
+    "./api": {
+      "types": "./lib/api.d.ts",
+      "default": "./lib/core.js"
+    },
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "host.js",
+    "client.js",
+    "lib/*.js",
+    "lib/*.d.ts",
+    "LICENSE",
+    "examples/**/*.js",
+    "examples/**/*.md",
+    "docs/*.md",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-client-ui-approval"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.5"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.5",
+    "typescript": "5.9.3"
+  }
+}

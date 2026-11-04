@@ -1,0 +1,14 @@
+{
+  "sha256": "8baaf8f116e473ad1f5e891bc2d7056eb335c064b54de18ab07f9ce54a29ab06",
+  "eventCount": 13,
+  "provenance": {
+    "capturedAt": "2026-11-04T12:58:31.090Z",
+    "capture": "controlled-native-runtime; actual AgentLoop + goal-round-driver; deterministic model stream stub",
+    "runtime": "/tmp/dshx/app/dsh/node_modules/@deepseek-ai",
+    "modelCalls": 1,
+    "manualSessionAppends": 0,
+    "redactions": [
+      "all content/arguments/results removed at source; goal identity anonymized and objective replaced with fixed [redacted]"
+    ]
+  }
+}
