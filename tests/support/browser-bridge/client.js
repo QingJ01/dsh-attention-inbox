@@ -1,8 +1,8 @@
-window.__ModuleLoader__.load({ id: '@local/attention-acceptance-bridge-v6', factory() {
+window.__ModuleLoader__.load({ id: '@local/attention-acceptance-bridge-v8', factory() {
   return { inject: ['connection', 'layout', 'uiSession', 'sessions'], async apply(ctx) {
     const abort = new AbortController(); ctx.effect(() => () => abort.abort())
-    const call = (payload) => ctx.connection.rpc.call('/api', 'attentionAcceptance', payload, abort.signal)
-    const frame = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    const call = async (payload) => { while (!abort.signal.aborted) { try { return await ctx.connection.rpc.call('/api', 'attentionAcceptance', payload, abort.signal) } catch (error) { if (abort.signal.aborted) throw error; await new Promise(resolve => setTimeout(resolve, 250)) } } abort.signal.throwIfAborted() }
+    const frame = () => new Promise((resolve) => { const timer = setTimeout(resolve, 80); requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(timer); resolve() })) })
     const execute = async (command) => {
       if (command.op === 'panel') { ctx.layout.selectPanel(command.panelId); await frame(); return { selected: true } }
       if (command.op === 'layout') return ctx.layout.getSnapshot?.() ?? null

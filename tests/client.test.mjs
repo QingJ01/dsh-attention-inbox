@@ -41,7 +41,9 @@ function harness(initial = [], initialHost = {}, options = {}) {
       if (name === '@deepseek-ai/cordis') return { Service }
       if (name !== 'react') throw new Error(`Unexpected Client dependency: ${name}`)
       return {
-        createElement: (type, props, ...children) => ({ type, props, children }),
+        // Like React, a component receives its children through props.children.
+        createElement: (type, props, ...children) => ({ type, children,
+          props: typeof type === 'function' && children.length ? { ...props, children: children.length === 1 ? children[0] : children } : props }),
         useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(), useState,
       }
     }) } }, open() {}, confirm: (label) => { confirmations.push(label); return typeof confirmResult === 'function' ? confirmResult() : confirmResult } },
@@ -57,6 +59,7 @@ function harness(initial = [], initialHost = {}, options = {}) {
   vm.runInContext(code, context)
   const setup = {
     reflect: { provide(name, value) { services.set(name, value) } },
+    get(name) { return name === 'remote' ? options.remoteRoot : services.get(name) },
     locale: { register: () => () => {}, bind: () => (key) => key, resolveText: (value) => value.en },
     effect(fn) { const release = fn(); let active = true
       const dispose = () => { if (active) { active = false; release?.() } }
@@ -67,17 +70,24 @@ function harness(initial = [], initialHost = {}, options = {}) {
     } },
     sessions: { list: { getSnapshot: () => ({ byId: sessionRows }), subscribe: (fn) => { sessionFeeds.add(fn); return () => sessionFeeds.delete(fn) } } },
     uiWorkspace: { openSession: (id) => opened.push(id) },
+    remote: options.remoteRoot,
     slots: { inject: (_name, fn) => fn(), register(definition, component) {
       registrations.push({ definition, component })
       if (definition.key === 'attention-inbox') props = definition.inject()
       return () => {}
     } },
   }
+  for (const [name, service] of Object.entries(options.namespaces ?? {})) services.set(`remote.${name}`, service)
+  let mounted
   if (options.owner) {
-    for (const name of ['locale', 'uiSession', 'sessions', 'uiWorkspace', 'slots']) options.owner.provide(name, setup[name])
-    module.apply(options.owner)
+    for (const [name, service] of Object.entries(options.namespaces ?? {})) options.owner.provide(`remote.${name}`, service)
+    for (const name of ['locale', 'uiSession', 'sessions', 'uiWorkspace', 'slots', 'remote'])
+      if (setup[name] !== undefined) options.owner.provide(name, setup[name])
+    if (options.asPlugin) mounted = options.owner.plugin({ name: 'attention-client-runtime-test', inject: module.inject, apply: module.apply })
+    else module.apply(options.owner)
   } else module.apply(setup)
   return {
+    ready: mounted,
     get client() { return options.owner?.get('attentionClient') ?? services.get('attentionClient') },
     get props() { return props }, get view() { return props.view.getSnapshot() }, feeds, intervals, requests, opened, registrations, timers,
     render(slot = 'main') { const registration = registrations.find((r) => r.definition.name === slot)
@@ -251,6 +261,7 @@ test('native Host mirrors deduplicate against live cards and cannot revive a set
   const h = harness([['s1', status(pending)]], { items: [mirror] })
   await flush()
   assert.equal(h.view.total, 1)
+  pending.answerable = false // Native PendingApproval actually settled; seat removal alone is insufficient.
   h.statuses([])
   assert.equal(h.view.total, 0)
   await h.poll()
@@ -268,7 +279,7 @@ test('external plugin questions are preserved even when no native card exists', 
 
 const nodes = (node) => Array.isArray(node) ? node.flatMap(nodes) : node && typeof node === 'object' ? [node, ...nodes(node.children)] : []
 const text = (node) => Array.isArray(node) ? node.map(text).join(' ') : node && typeof node === 'object' ? text(node.children) : String(node ?? '')
-const button = (tree, label) => nodes(tree).find((node) => node.type === 'button' && text(node) === label)
+const button = (tree, label) => nodes(tree).find((node) => node.type === 'button' && text(node).trim() === label)
 
 test('coverage compares every native pending Session on updates, including unknown and unavailable cards', async () => {
   const h = harness([
@@ -406,7 +417,7 @@ test('footer uses real L1/L2 and native-confirmed metrics; missing samples are e
   await flush()
   const footer = nodes(h.render()).find((node) => node.type === 'footer')
   assert.match(text(footer), /dropped 15/)
-  assert.match(text(footer), /L1 12 \/ L2 3/)
+  assert.match(text(footer), /sourceL1 12 \/ sourceL2 3/)
   assert.match(text(footer), /120|2min/)
   assert.match(text(footer), /80% \(4\/5\)/)
   h.setHost({})
@@ -434,6 +445,112 @@ test('plan review displays complete detail and uses the exact native intent appr
   await flush()
   assert.equal(replies[0].answers[0].selected[0], 'Ship the approved plan')
   assert.equal(replies[0].answers[0].id, 'review')
+  h.close()
+})
+
+const nativePlanQuestion = (callId = 'exec-plan') => ({ id: 'review', question: 'Review the plan?', detail: 'Complete native plan\nStep one\nStep two',
+  intent: { kind: 'plan-review', approve: 'Approve exact plan', callId },
+  options: [{ label: 'Request revision' }, { label: 'Approve exact plan' }] })
+const nativePlanMirror = (callId = 'exec-plan') => item({ key: 'host-plan', revision: 8, producer: 'builtin-plan', kind: 'plan-review', blocking: 'hard',
+  subject: { type: 'session', ref: 'plan-session' }, native: { callId }, title: 'Review the plan?', actions: ['subject.open'] })
+
+test('non-timed native plan intent deduplicates one card and badge and acknowledges the canonical Host identity', async () => {
+  let closed = false, h
+  const replies = [], q = nativePlanQuestion()
+  const pending = Object.freeze({ kind: 'plan-review', key: 'question:unnamed-browser-prefix:1', callId: undefined, questions: [q],
+    getSnapshot: () => ({ state: 'open', channel: 'waterfall', closed }), answer(value) {
+      replies.push(value); closed = true; h.statuses([])
+    } })
+  h = harness([['plan-session', status(pending)]], { items: [nativePlanMirror()] })
+  await flush()
+  assert.equal(pending.callId, undefined, 'the original non-timed PendingQuestion remains unnamed')
+  assert.equal(h.view.total, 1)
+  assert.equal(h.view.badge, 1)
+  assert.equal(h.view.coverage.gap, 0)
+  const tree = h.render()
+  assert.equal(nodes(tree).filter((node) => node.props?.['data-attention-key']).length, 1)
+  assert.ok(nodes(tree).some((node) => node.type === 'pre' && text(node) === q.detail))
+  assert.deepEqual(replies, [])
+  const approve = button(tree, q.intent.approve)
+  assert.ok(approve, 'the single rendered plan exposes its actual native approve option')
+  approve.props.onClick()
+  await flush()
+  assert.equal(replies.length, 1)
+  assert.equal(replies[0].answers[0].selected[0], q.intent.approve)
+  const acks = h.requests.filter((r) => r.op === 'native-action')
+  assert.equal(acks.map((r) => r.phase).join(','), 'attempt,accepted')
+  for (const ack of acks) {
+    assert.equal(ack.key, 'host-plan')
+    assert.equal(ack.revision, 8)
+    assert.equal(ack.callId, 'exec-plan')
+    assert.equal(ack.kind, 'plan-review')
+  }
+  assert.equal(pending.callId, undefined)
+  assert.equal(h.view.total, 0)
+  await h.poll()
+  assert.equal(h.view.total, 0, 'a stale Host plan does not revive the confirmed native response')
+  h.close()
+})
+
+test('explicit native plan callId takes precedence over a different intent identity', async () => {
+  const pending = { kind: 'plan-review', key: 'named-plan', callId: 'explicit-plan-call', questions: [nativePlanQuestion('different-intent-call')],
+    getSnapshot: () => ({ state: 'open', channel: 'waterfall', closed: false }), answer() {} }
+  const h = harness([['plan-session', status(pending)]], { items: [nativePlanMirror('explicit-plan-call')] })
+  await flush()
+  assert.equal(h.view.total, 1)
+  await h.props.run(h.view.items[0], 'question.answer', { answers: [{ id: 'review', selected: ['Approve exact plan'] }] })
+  const ack = h.requests.find((r) => r.op === 'native-action')
+  assert.equal(ack.callId, 'explicit-plan-call')
+  assert.equal(ack.key, 'host-plan')
+  h.close()
+})
+
+test('unnamed plan identity fallback rejects ambiguous, empty, or invalid native intents', async () => {
+  const valid = nativePlanQuestion()
+  const variants = [
+    { kind: 'plan-review', questions: [valid, { ...nativePlanQuestion('another-plan'), id: 'second' }] },
+    { kind: 'plan-review', questions: [nativePlanQuestion('   ')] },
+    { kind: 'plan-review', questions: [{ ...valid, intent: { ...valid.intent, approve: 'Not one of the real options' } }] },
+    { kind: 'plan-review', questions: [{ ...valid, multiSelect: true }] },
+    { kind: 'question', questions: [valid] },
+  ]
+  for (const variant of variants) {
+    const pending = { ...variant, key: 'ambiguous-plan', getSnapshot: () => ({ state: 'open', channel: 'waterfall', closed: false }), answer() {} }
+    const h = harness([['plan-session', status(pending)]], { items: [nativePlanMirror()] })
+    await flush()
+    assert.equal(h.view.total, 2, 'an unproven identity must not hide a separate Host obligation')
+    assert.equal(h.view.badge, 2)
+    assert.equal(h.view.coverage.gap, 0)
+    assert.equal(h.requests.some((r) => r.op === 'native-action'), false)
+    assert.equal(pending.callId, undefined)
+    h.close()
+  }
+})
+
+test('unnamed native plan that expires while attempt tracking is pending cannot be approved', async () => {
+  let closed = false, release, answers = 0
+  const pending = { kind: 'plan-review', key: 'expiring-plan', questions: [nativePlanQuestion()],
+    getSnapshot: () => ({ state: 'open', channel: 'waterfall', closed }), answer() { answers++ } }
+  const mirror = nativePlanMirror()
+  const h = harness([['plan-session', status(pending)]], { items: [mirror] })
+  await flush()
+  h.setFetch(async (_url, options) => {
+    const request = JSON.parse(options.body)
+    if (request.op === 'native-action' && request.phase === 'attempt') await new Promise((resolve) => { release = resolve })
+    return { ok: true, json: async () => ({ ok: true, items: [mirror] }) }
+  })
+  const operation = h.props.run(h.view.items[0], 'question.answer', { answers: [{ id: 'review', selected: ['Approve exact plan'] }] })
+  await flush()
+  closed = true
+  release()
+  await operation
+  assert.equal(answers, 0)
+  assert.equal(h.requests.filter((r) => r.op === 'native-action').map((r) => r.phase).join(','), 'attempt,failed')
+  assert.equal(h.view.total, 1)
+  assert.equal(h.view.failed[h.view.items[0].key], true)
+  h.statuses([])
+  assert.equal(h.view.total, 1, 'expiration alone cannot swallow the Host hard obligation')
+  assert.equal(h.view.items[0].key, 'host-plan')
   h.close()
 })
 
@@ -498,7 +615,7 @@ test('request replacement while native attempt acknowledgement is pending never 
 
 test('native tracking uses canonical Host mirror identity rather than browser approval render counters', async () => {
   let h
-  const pending = approval('approval:7', () => h.statuses([]))
+  const pending = approval('approval:7', () => { pending.answerable = false; h.statuses([]) })
   pending.callId = 'real-call'
   h = harness([['s', status(pending)]], { items: [item({ key: 'host-approval', revision: 9,
     kind: 'approval', blocking: 'hard', subject: { type: 'session', ref: 's' }, native: { callId: 'real-call', requestId: 'host-request-id' } })] })
@@ -651,6 +768,230 @@ test('actual Cordis caller lifecycle unregisters Client executors and aborts the
   } finally { await root.fiber.dispose() }
 })
 
+const continuedQuestion = (overrides = {}) => item({ key: 'host-question', producer: 'builtin-question', kind: 'question', blocking: 'hard',
+  subject: { type: 'session', ref: 'not-main-view' }, title: 'Which route?', actions: ['subject.open'],
+  native: { callId: 'continued-call', state: 'continued' },
+  questions: [{ id: 'route', question: 'Which route?', options: [{ label: 'A' }, { label: 'B' }] }], ...overrides })
+
+test('waterfall removal on timeout preserves the Host continued hard row and allows native RPC answer in place', async () => {
+  const replies = [], mirror = continuedQuestion()
+  let channel = 'waterfall', closed = false
+  const pending = { kind: 'question', key: 'waterfall-seat', callId: mirror.native.callId, questions: mirror.questions,
+    getSnapshot: () => ({ state: 'open', channel, closed }), answer() { throw new Error('expired waterfall must not answer') } }
+  const h = harness([['not-main-view', status(pending)]], { items: [mirror] }, {
+    namespaces: { userQuestions: { async answer(sessionId, callId, answer) { replies.push({ sessionId, callId, answer }); return { ok: true, value: true } } } },
+  })
+  await flush()
+  assert.equal(h.view.total, 1)
+  channel = 'none'; closed = true
+  h.statuses([])
+  assert.equal(h.view.total, 1, 'an expired composer seat is not a resolved question')
+  assert.equal(h.view.items[0].key, 'host-question')
+  assert.equal(h.view.badge, 1)
+  assert.equal(h.view.coverage.gap, 0)
+  assert.equal(h.view.items[0].questions[0].id, 'route')
+  let tree = h.render()
+  nodes(tree).find((node) => node.type === 'input' && node.props.type === 'radio').props.onChange()
+  tree = h.render()
+  nodes(tree).find((node) => node.type === 'form').props.onSubmit({ preventDefault() {} })
+  await flush()
+  assert.equal(replies.length, 1)
+  assert.equal(replies[0].sessionId, 'not-main-view')
+  assert.equal(replies[0].callId, 'continued-call')
+  assert.equal(replies[0].answer.answers[0].id, 'route')
+  assert.equal(replies[0].answer.answers[0].selected[0], 'A')
+  assert.deepEqual(h.opened, [], 'answering does not navigate or retain a main Session view')
+  assert.equal(h.view.total, 1, 'RPC accepted=true is queued, not settled')
+  assert.equal(h.view.pending['host-question'], true)
+  assert.equal(h.requests.filter((r) => r.op === 'native-action').map((r) => r.phase).join(','), 'attempt,accepted')
+  assert.equal(h.requests.some((r) => r.op === 'act'), false)
+  h.close()
+})
+
+test('continued RPC rejects refused/error results and retries; confirmed closure resists stale Host snapshots', async () => {
+  let result = { ok: true, value: false }, calls = 0
+  const mirror = continuedQuestion()
+  const h = harness([], { items: [mirror] }, { namespaces: { userQuestions: { async answer() { calls++; return result } } } })
+  await flush()
+  const input = { answers: [{ id: 'route', selected: ['B'] }] }
+  await h.props.run(h.view.items[0], 'question.answer', input)
+  assert.equal(h.view.total, 1)
+  assert.equal(h.view.failed['host-question'], true)
+  assert.equal(h.requests.filter((r) => r.op === 'native-action').map((r) => r.phase).join(','), 'attempt,failed')
+  result = { ok: false, error: { message: 'CALLER_NOT_LIVE' } }
+  await h.props.run(h.view.items[0], 'question.answer', input)
+  assert.equal(h.view.failed['host-question'], true)
+  assert.equal(calls, 2)
+  result = { ok: true, value: true }
+  await h.props.run(h.view.items[0], 'question.answer', input)
+  assert.equal(calls, 3)
+  assert.equal(h.view.failed['host-question'], undefined)
+  assert.equal(h.view.total, 1)
+  await h.props.run(h.view.items[0], 'question.answer', input)
+  assert.equal(calls, 3, 'queued response cannot be submitted twice while waiting for facts')
+  h.setHost({ items: [] })
+  await h.poll()
+  assert.equal(h.view.total, 0, 'only a new authoritative source cut confirms closure')
+  h.setHost({ items: [mirror] })
+  await h.poll()
+  assert.equal(h.view.total, 0, 'old native projection cannot resurrect an actually answered and closed question')
+  h.close()
+})
+
+test('continued-only RPC capability does not create a form for an open unowned waterfall', async () => {
+  let calls = 0
+  const mirror = continuedQuestion({ native: { callId: 'continued-call', state: 'open' } })
+  const h = harness([], { items: [mirror] }, { namespaces: { userQuestions: { async answer() { calls++; return { ok: true, value: true } } } } })
+  await flush()
+  assert.equal(h.view.total, 1)
+  assert.equal(h.view.items[0].questions, undefined)
+  assert.equal(nodes(h.render()).some((node) => node.type === 'form'), false)
+  await h.props.run(h.view.items[0], 'question.answer', {})
+  assert.equal(calls, 0)
+  assert.deepEqual(h.opened, ['not-main-view'])
+  h.close()
+})
+
+test('continued hard rows survive without RPC capability and preserve source-open fallback', async () => {
+  const h = harness([], { items: [continuedQuestion()] })
+  await flush()
+  assert.equal(h.view.total, 1)
+  assert.equal(h.view.badge, 1)
+  assert.equal(h.view.items[0].questions, undefined)
+  assert.ok(button(h.render(), 'open'))
+  await h.props.run(h.view.items[0], 'subject.open')
+  assert.deepEqual(h.opened, ['not-main-view'])
+  h.close()
+})
+
+test('native card with no channel uses exact Host continued DTO without fabricating a PendingQuestion', async () => {
+  let calls = 0, expiredCalls = 0
+  const mirror = continuedQuestion()
+  const pending = { kind: 'question', key: 'transition-seat', callId: mirror.native.callId, questions: mirror.questions,
+    getSnapshot: () => ({ state: 'open', channel: 'none', closed: false }), answer() { expiredCalls++ } }
+  const h = harness([['not-main-view', status(pending)]], { items: [mirror] }, {
+    namespaces: { userQuestions: { async answer() { calls++; return { ok: true, value: true } } } },
+  })
+  await flush()
+  assert.equal(h.view.total, 1)
+  assert.equal(h.view.items[0].questions[0].id, 'route')
+  await h.props.run(h.view.items[0], 'question.answer', { answers: [{ id: 'route', selected: ['A'] }] })
+  assert.equal(calls, 1)
+  assert.equal(expiredCalls, 0)
+  h.statuses([])
+  assert.equal(h.view.total, 1, 'queued native RPC reply is not a tombstone when the composer seat disappears')
+  assert.equal(h.view.badge, 1)
+  h.close()
+})
+
+test('continued RPC checks Host revision again after asynchronous attempt tracking', async () => {
+  let calls = 0, release
+  const mirror = continuedQuestion()
+  const h = harness([], { items: [mirror] }, { namespaces: { userQuestions: { async answer() { calls++; return { ok: true, value: true } } } } })
+  await flush()
+  h.setFetch(async (_url, options) => {
+    const request = JSON.parse(options.body)
+    if (request.op === 'native-action' && request.phase === 'attempt') await new Promise((resolve) => { release = resolve })
+    return { ok: true, json: async () => ({ ok: true, items: [continuedQuestion({ revision: 2, title: 'Changed' })] }) }
+  })
+  const operation = h.props.run(h.view.items[0], 'question.answer', { answers: [{ id: 'route', selected: ['A'] }] })
+  await flush()
+  await h.poll()
+  release()
+  await operation
+  assert.equal(calls, 0)
+  assert.equal(h.view.total, 1)
+  assert.equal(h.view.failed['host-question'], true)
+  h.close()
+})
+
+test('actual Cordis resolves continued answers from a separate remote.userQuestions service', {
+  skip: !process.env.DSH_TEST_RUNTIME && 'set DSH_TEST_RUNTIME to real Cordis runtime',
+}, async () => {
+  const { Context, Service } = await import(pathToFileURL(`${process.env.DSH_TEST_RUNTIME}/cordis/lib/index.js`).href)
+  const root = new Context(), replies = []
+  root.provide('remote', { namespaces: new Map() })
+  const namespace = root.plugin((ctx) => {
+    ctx.provide('remote.userQuestions', { async answer(sessionId, callId, answer) {
+      replies.push({ sessionId, callId, answer }); return { ok: true, value: true }
+    } })
+  })
+  await namespace
+  const h = harness([], { items: [continuedQuestion()] }, { owner: root, Service, asPlugin: true })
+  try {
+    await h.ready
+    await flush()
+    assert.equal(root.get('remote').userQuestions, undefined, 'the raw root service has no namespace getter')
+    assert.equal(typeof root.get('remote.userQuestions').answer, 'function')
+    assert.equal(h.view.items[0].questions[0].id, 'route')
+    assert.ok(nodes(h.render()).some((node) => node.type === 'form'))
+    await h.props.run(h.view.items[0], 'question.answer', { answers: [{ id: 'route', selected: ['B'] }] })
+    assert.equal(replies.length, 1)
+    assert.equal(replies[0].sessionId, 'not-main-view')
+    assert.equal(replies[0].callId, 'continued-call')
+    assert.equal(h.view.total, 1, 'a queued RPC reply does not close the hard obligation')
+    h.expireTimers()
+    await namespace.dispose()
+    await h.poll()
+    assert.equal(h.view.items[0].questions, undefined)
+    assert.equal(h.view.badge, 1)
+    assert.ok(button(h.render(), 'open'), 'removing the optional namespace preserves source navigation')
+  } finally { await root.fiber.dispose() }
+})
+
+test('actual ClientRemoteService and generated userQuestions Remote render and dispatch continued answers', {
+  skip: !process.env.DSH_TEST_RUNTIME && 'set DSH_TEST_RUNTIME to real Client gateway runtime',
+}, async () => {
+  const load = (name, entry) => import(pathToFileURL(`${process.env.DSH_TEST_RUNTIME}/${name}/lib/${entry}`).href)
+  const { Context, Service } = await load('cordis', 'index.js')
+  const gateway = await load('dsh-api-gateway', 'types/client/index.js')
+  const { TYPERT_REMOTE } = await load('dsh-user-questions', 'typert.remote-client.js')
+  const root = new Context(), calls = [], registrations = []
+  root.provide('typert', {
+    contexts: { getClient: () => undefined },
+    remotes: { register(contribution) { registrations.push(contribution); return () => {} } },
+  })
+  root.provide('connection', {
+    interactions: 'none',
+    rpc: {
+      open() { throw new Error('the answer must use the direct native RPC endpoint') },
+      async call(path, endpoint, payload, signal) { calls.push({ path, endpoint, payload, signal }); return { ok: true, value: true } },
+    },
+  })
+  try {
+    const gatewayFiber = root.plugin(gateway)
+    await gatewayFiber
+    const release = await root.get('remote').$mount(TYPERT_REMOTE)
+    assert.equal(registrations[0], TYPERT_REMOTE)
+    assert.equal(Object.getOwnPropertyDescriptor(root.get('remote'), 'userQuestions'), undefined, 'actual root service owns no namespace getter')
+    assert.equal(typeof root.get('remote.userQuestions').answer, 'function', 'generated Remote creates the separate Cordis namespace')
+    const h = harness([], { items: [continuedQuestion()] }, { owner: root, Service, asPlugin: true })
+    await h.ready
+    await flush()
+    let tree = h.render()
+    nodes(tree).find((node) => node.type === 'input' && node.props.type === 'radio').props.onChange()
+    tree = h.render()
+    nodes(tree).find((node) => node.type === 'form').props.onSubmit({ preventDefault() {} })
+    await flush()
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].path, '/api')
+    assert.equal(calls[0].endpoint, 'userQuestions/answer')
+    assert.equal(calls[0].payload.args.agentId, 'not-main-view')
+    assert.equal(calls[0].payload.args.callId, 'continued-call')
+    assert.equal(calls[0].payload.args.answer.answers[0].id, 'route')
+    assert.equal(calls[0].payload.args.answer.answers[0].selected[0], 'A')
+    assert.equal(calls[0].signal.aborted, false)
+    assert.deepEqual(h.opened, [])
+    assert.equal(h.view.total, 1)
+    h.expireTimers()
+    await release()
+    await h.poll()
+    assert.equal(root.get('remote.userQuestions'), undefined)
+    assert.equal(h.view.items[0].questions, undefined)
+    assert.ok(button(h.render(), 'open'))
+  } finally { await root.fiber.dispose() }
+})
+
 test('defaultAction displays a localized label without exposing input or scheduling execution', async () => {
   let executions = 0
   const h = harness([], { items: [
@@ -675,5 +1016,27 @@ test('defaultAction displays a localized label without exposing input or schedul
   assert.ok(text(tree).includes('defaultAction: 本地清理'))
   assert.equal(executions, 0, 'past deadlines, polling and rendering never run the default action')
   assert.equal(h.requests.some((request) => request.op === 'act'), false)
+  h.close()
+})
+
+test('cards speak the person\'s language: provider errors are explained, Host placeholders are localized', async () => {
+  const raw = 'llm-deepseek: no API key for provider route "deepseek-official"; store DEEPSEEK_API_KEY through the credentials service'
+  const h = harness([], { items: [
+    item({ key: 'f1', kind: 'turn-failed', title: raw, subject: { type: 'session', ref: 's1' } }),
+    item({ key: 'f2', kind: 'turn-failed', title: 'max-tokens', subject: { type: 'session', ref: 's2' } }),
+    item({ key: 'r1', kind: 'review', title: '自主运行已完成，待验收 / Autonomous turn ready for review', subject: { type: 'session', ref: 's3' } }),
+    item({ key: 'f3', kind: 'turn-failed', title: 'Request failed with status 429 Too Many Requests', subject: { type: 'session', ref: 's4' } }),
+  ] })
+  await flush()
+  const tree = h.render()
+  const card = (key) => nodes(tree).find((node) => node.props?.['data-attention-key'] === key)
+  const body = (key) => text(card(key))
+  assert.match(body('f1'), /kindFailed/)
+  assert.match(body('f1'), /errNoKey/, 'the explanation, not the raw provider text, is the headline')
+  const rawBlock = nodes(card('f1')).find((node) => node.props?.className === 'ai-raw')
+  assert.ok(rawBlock && text(rawBlock).includes('DEEPSEEK_API_KEY'), 'the original stays one click away')
+  assert.match(body('f2'), /errCut/); assert.ok(!nodes(card('f2')).some((node) => node.props?.className === 'ai-raw'), 'nothing raw to show for a known stop reason')
+  assert.match(body('r1'), /reviewFallback/); assert.doesNotMatch(body('r1'), /Autonomous turn/)
+  assert.match(body('f3'), /errRate/)
   h.close()
 })

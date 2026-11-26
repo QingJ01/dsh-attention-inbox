@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
-import { AttentionService } from '../lib/service.js'
+import { AttentionService, openStore } from '../lib/service.js'
 import { ContextualAttentionService } from '../lib/contextual.js'
 
 const draft = (key, patch = {}) => ({ key, subject: { type: 'record', ref: key }, kind: 'question', title: 'Please decide', ...patch })
@@ -166,6 +166,53 @@ test('expired external facts are durably closed by timer without a reader', asyn
     assert.equal(store.data.external[item.key], undefined)
     assert.equal(store.data.ledger.find((row) => row.key === item.key)?.resolution, 'expired')
   } finally { t.mock.timers.reset(); await engine.shutdown() }
+})
+
+async function restored(state) {
+  const ctx = new Context(), warnings = []
+  let persisted = structuredClone(state)
+  const store = await openStore({ storageDomain: { async open(spec) {
+    return { global: { get: () => structuredClone(persisted), async set(next) { persisted = spec.global.schema.parse(next) } }, async close() {} }
+  } } })
+  const engine = new AttentionService({ logger: { warn(...args) { warnings.push(args) } } }, store)
+  await ctx.plugin({ name: 'attention-host', apply(scope) { new ContextualAttentionService(scope, engine) } })
+  return { ctx, store, engine, warnings, persisted: () => structuredClone(persisted), async close() { await ctx.fiber.dispose(); await engine.shutdown() } }
+}
+
+test('plugin budget survives a crash with a new Cordis context and different explicit producers', async () => {
+  const first = await restored({ dispositions: {}, external: {}, ledger: [] })
+  let crashSnapshot
+  try {
+    await first.ctx.plugin({ name: 'persistent-owner', inject: ['attention'], async apply(ctx) {
+      await Promise.all(Array.from({ length: 50 }, (_, i) => ctx.attention.raise(draft(`old-${i}`), i < 25 ? undefined : `explicit-${i}`)))
+    } })
+    crashSnapshot = first.persisted() // A crash retains this commit and skips caller disposal.
+    assert.equal(Object.keys(crashSnapshot.external).length, 50)
+  } finally { await first.close() }
+  assert.equal(Object.keys(first.persisted().external).length, 0, 'normal caller disposal durably withdraws its submissions')
+  assert.equal(first.persisted().ledger.filter((row) => row.resolution === 'withdrawn').length, 50)
+  assert.deepEqual(first.persisted().externalOwnerAssignments, {}, 'normal shutdown removes internal ownership with the facts')
+  assert.equal(new Set(Object.values(crashSnapshot.externalOwnerAssignments)).size, 1)
+
+  const second = await restored(crashSnapshot); let api
+  try {
+    await second.ctx.plugin({ name: 'persistent-owner', inject: ['attention'], apply(ctx) { api = ctx.attention } })
+    const before = second.persisted()
+    await assert.rejects(api.raise(draft('new-default')), /PRODUCER_LIMIT/)
+    await assert.rejects(api.raise(draft('new-explicit'), 'completely-new-producer'), /PRODUCER_LIMIT/)
+    api.registerProducer({ id: 'new-derived', subjectType: 'record', derive: () => [draft('new-derived')] })
+    assert.throws(() => api.invalidate('new-derived', 'new-ref'), /PRODUCER_LIMIT/)
+    assert.deepEqual(second.persisted(), before, 'refused updates preserve all persisted facts and ownership')
+    assert.equal(second.warnings.length, 3)
+    const updated = await api.raise(draft('old-0'))
+    assert.equal(updated.revision, 1, 'persisting an internal owner cannot change content revisions')
+    assert.deepEqual({ ...updated, expiresAt: undefined }, { ...before.external[updated.key], expiresAt: undefined }, 'ownership stays outside the obligation DTO; reasserting only refreshes expiry')
+    await second.ctx.plugin({ name: 'independent-owner', inject: ['attention'], async apply(ctx) { await ctx.attention.raise(draft('independent')) } })
+    assert.equal(second.engine.raw().length, 51, 'another plugin retains its own independent budget')
+  } finally { await second.close() }
+  assert.deepEqual(second.persisted().external, {}, 'restarted caller adopts its orphaned commits and withdraws them on normal unload')
+  assert.deepEqual(second.persisted().externalOwnerAssignments, {})
+  assert.equal(second.persisted().ledger.filter((row) => row.resolution === 'withdrawn').length, 51)
 })
 
 test('Host actions receive a signal and reject client executors while retaining client metadata', async () => {
