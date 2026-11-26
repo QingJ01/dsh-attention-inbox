@@ -121,9 +121,11 @@ test('real recording: actual Host cold backfill obligations equal live derivatio
   for (const session of data.sessions) {
     const events = eventsOf(session), ctx = new Context()
     let persisted, route
+    const domains = new Map()
     ctx.provide('storageDomain', { async open(spec) {
-      persisted = structuredClone(spec.global.initial)
-      return { global: { get: () => structuredClone(persisted), async set(next) { persisted = spec.global.schema.parse(next) } }, async close() {} }
+      domains.set(spec.name, structuredClone(spec.global.initial))
+      if (spec.name === 'attention_inbox') persisted = domains.get(spec.name)
+      return { global: { get: () => structuredClone(domains.get(spec.name)), async set(next) { domains.set(spec.name, spec.global.schema.parse(next)); if (spec.name === 'attention_inbox') persisted = domains.get(spec.name) } }, async close() {} }
     } })
     ctx.provide('connection', { fetch: { register(definition) { route = definition; return () => {} } } })
     try {

@@ -1,19 +1,27 @@
 import { connectInspector } from './cdp.mjs'
+import { performIsolatedInput } from './browser-actions.mjs'
 import { writeFile, mkdir } from 'node:fs/promises'
 import assert from 'node:assert/strict'
 const c = await connectInspector(process.env.DSH_TEST_INSPECTOR ?? 'http://127.0.0.1:9230')
 const invoke = (service, method, arg) => c.rootCall(`function(){return this.get(${JSON.stringify(service)})[${JSON.stringify(method)}](${JSON.stringify(arg)})}`)
-const browser = (command) => invoke('attentionAcceptanceBridge', 'command', command)
+const browser = async (command) => {
+  const page=globalThis.__attentionAcceptancePage
+  if(page&&['click','input'].includes(command.op)){
+    return performIsolatedInput(page,command)
+  }
+  return invoke('attentionAcceptanceBridge','command',command)
+}
 const waitFor = async (read, predicate, label) => {
   for(let attempt=0;attempt<100;attempt++) { const value=await read();if(predicate(value))return value;await new Promise(resolve=>setTimeout(resolve,100)) }
   throw new Error('Timed out: '+label)
 }
-const report={capturedAt:new Date().toISOString(),target:'existing Desktop GUI',model:'fixed fixture stream; native Host and Client objects',cases:[],cleanup:null}
+const report={capturedAt:new Date().toISOString(),target:'isolated DSH process and dedicated browser profile',model:'fixed fixture stream; native Host and Client objects',cases:[],cleanup:null}
 let fatal
 try {
   await browser({op:'panel',panelId:'attention-inbox'})
-  for(const kind of ['approval-allow','approval-reject','question-open','question-continued','plan-review']) {
-    const started=await invoke('attentionAcceptanceFixtures','start',{kind,cwd:process.cwd(),deferLaunch:true})
+  const kinds=process.env.DSH_TEST_CASES?.split(',') ?? ['approval-allow','approval-reject','question-open','question-continued','plan-review']
+  for(const kind of kinds) {
+    const started=await invoke('attentionAcceptanceFixtures','start',{kind,cwd:process.env.DSH_TEST_WORKSPACE,deferLaunch:true})
     const {id}=started
     await waitFor(()=>browser({op:'snapshot',sessionIds:[id]}),view=>view.knownSessions?.includes(id),'native sidebar Session retention')
     await invoke('attentionAcceptanceFixtures','launch',id)
@@ -22,13 +30,16 @@ try {
     assert.equal(native.mainView,0,'Native interaction must be answerable outside the main Session view')
     assert.equal(snapshot.coverageGap,'0')
     if(kind==='question-continued') await waitFor(()=>invoke('attentionAcceptanceFixtures','status',id),s=>s.questions?.active.some(q=>q.state==='continued'),'native continued state')
-    const ready=await waitFor(()=>browser({op:'snapshot',sessionIds:[id]}),view=>view.cards.some(card=>card.key.includes(id)),'current native card after channel transition')
-    const card=ready.cards.find(row=>row.key.includes(id))
+    const requiredAction=kind.startsWith('approval-')?`approval.${kind==='approval-reject'?'reject':'allow-once'}`:'question.answer'
+    const ready=await waitFor(()=>browser({op:'snapshot',sessionIds:[id]}),view=>view.cards.some(card=>card.key.includes(id)&&card.buttons.some(button=>button.id===requiredAction)),'answerable native card after channel transition')
+    const matchingCards=ready.cards.filter(row=>row.key.includes(id))
+    assert.equal(matchingCards.length,1,'One native request must have exactly one inbox card')
+    const card=matchingCards[0]
     const selector=`[data-attention-key=${JSON.stringify(card.key)}]`
     if(kind.startsWith('approval-')) await browser({op:'click',selector:selector+` [data-action-id="approval.${kind==='approval-reject'?'reject':'allow-once'}"]`})
-    else if(kind==='plan-review') await browser({op:'click',selector:selector+' [data-action-id="question.answer"][data-option-label]'})
+    else if(kind==='plan-review') await browser({op:'click',selector:selector+' [data-action-id="question.answer"][data-option-label]',index:0})
     else {
-      await browser({op:'click',selector:selector+' input[type="radio"]'})
+      await browser({op:'click',selector:selector+' input[type="radio"]',index:0})
       await browser({op:'click',selector:selector+' button[data-action-id="question.answer"]'})
     }
     const final=await waitFor(()=>invoke('attentionAcceptanceFixtures','status',id),s=>s.toolResults.length>0&&!s.running,kind+' native resolution')
@@ -38,7 +49,8 @@ try {
     assert.equal(settled.coverageGap,'0')
     await c.rootCall(`async function(){await this.get('attention').engine.queue}`)
     const confirmed=await invoke('attentionAcceptanceFixtures','status',id)
-    const result={kind,mainViewBefore:native.mainView,coverageGap:Number(snapshot.coverageGap),nativeToolSucceeded:true,modelStubCalls:final.modelStubCalls,closedInInbox:true,composerCleared:true,ledger:confirmed.attention?.ledger.map(row=>({kind:row.kind,resolution:row.resolution,via:row.via,nativeConfirmed:row.nativeConfirmed}))??[]}
+    assert.ok(confirmed.attention?.ledger.some(row=>row.resolution==='acted'&&row.via==='inbox'&&row.nativeConfirmed===true),'A native source fact must confirm the in-place action')
+    const result={kind,mainViewBefore:native.mainView,coverageGap:Number(snapshot.coverageGap),nativeToolSucceeded:true,modelStubCalls:confirmed.modelStubCalls,closedInInbox:true,composerCleared:true,ledger:confirmed.attention?.ledger.map(row=>({kind:row.kind,resolution:row.resolution,via:row.via,nativeConfirmed:row.nativeConfirmed}))??[]}
     report.cases.push(result);console.log(JSON.stringify(result))
     await invoke('attentionAcceptanceFixtures','finish',id)
   }

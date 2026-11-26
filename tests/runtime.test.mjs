@@ -11,9 +11,11 @@ test('actual Cordis + SessionStore + ProjectionRegistry: mount, replay, route, t
   const { default: SessionStore } = await load('dsh-session')
   const { default: Registry } = await load('dsh-session-projection')
   const ctx = new Context(); let route, global, closed = false
+  const domains = new Map()
   ctx.provide('storageDomain', { async open(spec) {
-    global ??= structuredClone(spec.global.initial)
-    return { global: { get: () => structuredClone(global), async set(value) { global = spec.global.schema.parse(value) } }, async close() { closed = true } }
+    if (!domains.has(spec.name)) domains.set(spec.name, structuredClone(spec.global.initial))
+    if (spec.name === 'attention_inbox') global = domains.get(spec.name)
+    return { global: { get: () => structuredClone(domains.get(spec.name)), async set(value) { domains.set(spec.name, spec.global.schema.parse(value)) } }, async close() { if (spec.name === 'attention_inbox') closed = true } }
   } })
   ctx.provide('connection', { fetch: { register(def) { route = def; return ctx.effect(() => () => { route = undefined }) } } })
   try {
